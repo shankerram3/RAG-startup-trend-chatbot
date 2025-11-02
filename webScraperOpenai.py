@@ -4,11 +4,64 @@ import logging
 import re
 import spacy
 import csv
+from neo4j import GraphDatabase  # NEW
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 BASE_URL = "https://techcrunch.com/category/startups/"
 nlp = spacy.load("en_core_web_sm")
+
+# --- Neo4j Connection ---
+driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "1234567890"))
+
+def save_to_neo4j(article):
+    people = article["signals"]["people"]
+    orgs = article["signals"]["organizations"]
+    sectors = article["signals"]["sectors"]
+    funding = article["signals"]["funding_mentions"]
+
+    with driver.session() as session:
+        # Person → Startup
+        if people and orgs:
+            for person in people:
+                for org in orgs:
+                    session.run("""
+                        MERGE (p:Person {name: $person})
+                        MERGE (s:Startup {name: $org})
+                        MERGE (p)-[:FOUNDER_OF]->(s)
+                    """, {"person": person, "org": org})
+
+        # Startup → Sector
+        if orgs and sectors:
+            for org in orgs:
+                for sector in sectors:
+                    session.run("""
+                        MERGE (s:Startup {name: $org})
+                        MERGE (sec:Sector {name: $sector})
+                        MERGE (s)-[:OPERATES_IN]->(sec)
+                    """, {"org": org, "sector": sector})
+
+        # Startup → FundingRound
+        if orgs and funding:
+            for org in orgs:
+                for fund in funding:
+                    session.run("""
+                        MERGE (s:Startup {name: $org})
+                        MERGE (f:FundingRound {amount: $fund, date: $date})
+                        MERGE (s)-[:RAISED]->(f)
+                    """, {"org": org, "fund": fund, "date": article["date"]})
+
+        session.run("""
+            MERGE (a:Article {url: $url})
+            SET a.title = $title, a.author = $author, a.date = $date, a.content = $content
+        """, {
+            "url": article["url"],
+            "title": article["title"],
+            "author": article["author"],
+            "date": article["date"],
+            "content": article["content"]
+        })
+    logging.info(f"Inserted into Neo4j: {article['title']}")
 
 # --- Utility: Extract structured info ---
 def extract_entities(content: str):
@@ -23,13 +76,16 @@ def extract_entities(content: str):
 
     # Hiring pattern
     hiring_keywords = re.findall(
-        r"\b(hiring|expanding team|recruiting|job openings)\b", 
+        r"\b(hiring|expanding team|recruiting|job openings)\b",
         content, flags=re.IGNORECASE
     )
 
-    # Sector keywords (expand this list later)
-    sector_keywords = ["AI", "fintech", "crypto", "gaming", "healthtech", "biotech", "SaaS"]
-    sectors = [kw for kw in sector_keywords if kw.lower() in content.lower()]
+    # Normalize sector keywords (always uppercase for consistency)
+    sector_keywords = ["AI", "Fintech", "Crypto", "Gaming", "HealthTech", "BioTech", "SaaS"]
+    sectors = []
+    for kw in sector_keywords:
+        if kw.lower() in content.lower():
+            sectors.append(kw.upper())   # store consistently as UPPERCASE
 
     return {
         "people": people,
@@ -38,13 +94,12 @@ def extract_entities(content: str):
         "hiring_signals": hiring_keywords,
         "sectors": sectors
     }
-
 # --- Scraper ---
 def scrape_articles(pages=3):
     url = BASE_URL
     articles = []
 
-    for page in range(1, pages + 1):
+    for page in range(3, pages + 1):
         logging.info(f"Fetching page {page}: {url}")
         resp = requests.get(url)
         if resp.status_code != 200:
@@ -125,8 +180,11 @@ if __name__ == "__main__":
     data = scrape_articles(pages=3)
     logging.info(f"Scraped {len(data)} articles.")
     save_to_csv(data)
+
+    for art in data:
+        save_to_neo4j(art)   # NEW: push to Neo4j
+
     for art in data[:3]:
         print("\n---")
         print(f"📰 {art['title']}")
-        print(f"📑 Summary: {art['summary'][:150]}...")
         print(f"🔗 Link: {art['url']}")
