@@ -1,1 +1,20 @@
+# Environment files
 .env
+.env.*
+*.env
+!.env.example
+
+# macOS
+.DS_Store
+
+# Python & venv
+__pycache__/
+.venv/
+*.pyc
+
+# VS Code & IDEs
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
